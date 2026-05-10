@@ -1,21 +1,28 @@
-# read-process-write-sorting
+# Read-Process-Write Sorting Reproduction
 
-## structure of this project
-read-process-write-sorting/
-│
-├── data.py
-├── modules.py
-├── model.py
-├── train.py
-├── evaluate.py
-├── config.py
-└── README.md
+This repository reproduces the Read-Process-Write architecture from the paper *Order Matters: Sequence to Sequence for Sets* using PyTorch.
 
-|文件	|作用 |
-|data.py|	生成排序任务数据集|
-modules.py	放 Read / Process / Write 模块
-model.py	组合完整 ReadProcessWriteModel
-train.py	训练入口
-evaluate.py	测试模型效果
-config.py	管理超参数
-README.md	记录实验说明
+## Current Progress
+
+### Implemented
+
+- [x] Synthetic sorting dataset
+- [x] Read module: maps each scalar input into a memory embedding using an MLP
+- [x] Process module: performs multiple attention-based processing steps over input memories
+- [x] Write module: uses a Pointer Network-style decoder to output sorted input indices
+- [x] Training script for the basic sorting task
+- [x] Evaluation script using exact-match sorting accuracy
+- [x] Masking mechanism to prevent repeated selection
+
+### Not Yet Implemented
+
+- [ ] Glimpse attention before pointer output
+- [ ] Baseline Pointer Network model
+- [ ] Experiments for different set sizes, such as N = 5, 10, 15
+- [ ] Comparison between RPW model and baseline Ptr-Net
+- [ ] Experiment table similar to the paper
+
+## Next Steps
+
+The next stage is to extend the current Write module with glimpse attention.  
+After that, we will implement the baseline Pointer Network and compare it with the Read-Process-Write model on the sorting task.
