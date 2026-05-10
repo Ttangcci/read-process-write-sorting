@@ -43,6 +43,7 @@ def train():
             x = x.to(device)
             target = target.to(device)
 
+            # teacher forcing：训练时把真实排序下标传给 decoder，稳定序列学习。
             logits = model(x, target=target)
 
             loss = F.cross_entropy(
@@ -56,6 +57,7 @@ def train():
 
             total_loss += loss.item() * x.size(0)
 
+            # 指标使用 greedy 解码，和 evaluate.py 的推理口径保持一致。
             model.eval()
             with torch.no_grad():
                 greedy_logits = model(x, target=None)
