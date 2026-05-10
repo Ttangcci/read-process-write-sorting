@@ -12,6 +12,7 @@ env/
 *.pt
 *.pth
 *.ckpt
+experiment_results.csv
 
 .DS_Store
 .vscode/

@@ -1,0 +1,214 @@
+import argparse
+import csv
+import time
+
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+
+import config
+from baseline import PointerNetwork
+from data import SortingDataset
+from model import ReadProcessWriteModel
+
+
+def parse_int_list(value):
+    # 命令行参数形如 "5,10,15"，这里转成整数列表。
+    return [int(item) for item in value.split(",") if item.strip()]
+
+
+def make_loader(num_samples, set_size, batch_size, shuffle):
+    dataset = SortingDataset(num_samples=num_samples, set_size=set_size)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+
+
+def train_one_epoch(model, dataloader, optimizer, device):
+    model.train()
+    total_loss = 0.0
+    total_samples = 0
+
+    for x, target in dataloader:
+        x = x.to(device)
+        target = target.to(device)
+
+        # 两类模型都实现了相同接口，因此训练逻辑可以复用。
+        logits = model(x, target=target)
+        loss = F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            target.reshape(-1)
+        )
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item() * x.size(0)
+        total_samples += x.size(0)
+
+    return total_loss / total_samples
+
+
+def evaluate_model(model, dataloader, device, set_size):
+    model.eval()
+    total_correct = 0
+    total_valid = 0
+    total_samples = 0
+    valid_order = torch.arange(set_size, device=device)
+
+    with torch.no_grad():
+        for x, target in dataloader:
+            x = x.to(device)
+            target = target.to(device)
+
+            logits = model(x, target=None)
+            pred = logits.argmax(dim=-1)
+
+            correct = (pred == target).all(dim=1).sum().item()
+            # valid_permutation 用于发现重复选择或漏选输入位置的问题。
+            valid = (
+                pred.sort(dim=1).values == valid_order.unsqueeze(0)
+            ).all(dim=1).sum().item()
+
+            total_correct += correct
+            total_valid += valid
+            total_samples += x.size(0)
+
+    return {
+        "exact_match": total_correct / total_samples,
+        "valid_permutation": total_valid / total_samples,
+    }
+
+
+def run_single_experiment(
+    model_name,
+    model,
+    set_size,
+    process_steps,
+    args,
+    device
+):
+    train_loader = make_loader(
+        args.train_samples,
+        set_size,
+        args.batch_size,
+        shuffle=True
+    )
+    test_loader = make_loader(
+        args.test_samples,
+        set_size,
+        args.batch_size,
+        shuffle=False
+    )
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    start_time = time.time()
+    train_loss = 0.0
+
+    for _ in range(args.epochs):
+        train_loss = train_one_epoch(model, train_loader, optimizer, device)
+
+    metrics = evaluate_model(model, test_loader, device, set_size)
+    metrics.update({
+        "model": model_name,
+        "set_size": set_size,
+        "process_steps": process_steps,
+        "train_loss": train_loss,
+        "seconds": time.time() - start_time,
+    })
+    return metrics
+
+
+def write_result(path, fieldnames, row, write_header):
+    with open(path, "a", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Compare RPW and Pointer Network on sorting."
+    )
+    parser.add_argument("--set-sizes", default="5,10,15")
+    parser.add_argument("--process-steps", default="0,1,5,10")
+    parser.add_argument("--train-samples", type=int, default=config.TRAIN_SAMPLES)
+    parser.add_argument("--test-samples", type=int, default=config.TEST_SAMPLES)
+    parser.add_argument("--batch-size", type=int, default=config.BATCH_SIZE)
+    parser.add_argument("--hidden-dim", type=int, default=config.HIDDEN_DIM)
+    parser.add_argument("--epochs", type=int, default=config.NUM_EPOCHS)
+    parser.add_argument("--lr", type=float, default=config.LEARNING_RATE)
+    parser.add_argument("--output", default="experiment_results.csv")
+    args = parser.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    set_sizes = parse_int_list(args.set_sizes)
+    process_steps_list = parse_int_list(args.process_steps)
+
+    fieldnames = [
+        "model",
+        "set_size",
+        "process_steps",
+        "epochs",
+        "train_samples",
+        "test_samples",
+        "hidden_dim",
+        "train_loss",
+        "exact_match",
+        "valid_permutation",
+        "seconds",
+    ]
+    with open(args.output, "w", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+
+    for set_size in set_sizes:
+        # Ptr-Net 不包含 process step，因此每个 N 只训练一次 baseline。
+        baseline = PointerNetwork(
+            input_dim=1,
+            hidden_dim=args.hidden_dim
+        ).to(device)
+        result = run_single_experiment(
+            "PointerNetwork",
+            baseline,
+            set_size,
+            "NA",
+            args,
+            device
+        )
+        result.update({
+            "epochs": args.epochs,
+            "train_samples": args.train_samples,
+            "test_samples": args.test_samples,
+            "hidden_dim": args.hidden_dim,
+        })
+        write_result(args.output, fieldnames, result, write_header=False)
+        print(result)
+
+        for process_steps in process_steps_list:
+            # RPW 对同一个 N 测试不同 process step，观察 process attention 的影响。
+            rpw = ReadProcessWriteModel(
+                input_dim=1,
+                hidden_dim=args.hidden_dim,
+                process_steps=process_steps
+            ).to(device)
+            result = run_single_experiment(
+                "ReadProcessWrite",
+                rpw,
+                set_size,
+                process_steps,
+                args,
+                device
+            )
+            result.update({
+                "epochs": args.epochs,
+                "train_samples": args.train_samples,
+                "test_samples": args.test_samples,
+                "hidden_dim": args.hidden_dim,
+            })
+            write_result(args.output, fieldnames, result, write_header=False)
+            print(result)
+
+
+if __name__ == "__main__":
+    main()

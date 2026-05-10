@@ -39,10 +39,12 @@ def evaluate():
             x = x.to(device)
             target = target.to(device)
 
+            # 评估时不传 target，模型按自回归方式逐步选择输入位置。
             logits = model(x, target=None)
             pred = logits.argmax(dim=-1)
 
             correct = (pred == target).all(dim=1).sum().item()
+            # 除 exact match 外，也检查输出是否为 0..N-1 的合法排列。
             valid = (
                 pred.sort(dim=1).values == valid_order.unsqueeze(0)
             ).all(dim=1).sum().item()

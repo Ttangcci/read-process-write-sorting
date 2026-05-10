@@ -13,8 +13,14 @@ class ReadProcessWriteModel(nn.Module):
         )
         self.write = WriteModule(hidden_dim=hidden_dim)
 
-    def forward(self, x, target=None):
+    def forward(self, x, target=None, mask_selected=True):
+        # 整体流程：Read 编码集合元素，Process 构建全局上下文，Write 输出排序下标序列。
         memory = self.read(x)
         context = self.process(memory)
-        logits = self.write(memory, context, target=target)
+        logits = self.write(
+            memory,
+            context,
+            target=target,
+            mask_selected=mask_selected
+        )
         return logits
