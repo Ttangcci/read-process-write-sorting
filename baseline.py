@@ -5,9 +5,13 @@ import torch.nn as nn
 class PointerNetwork(nn.Module):
     """基线模型：LSTM encoder-decoder 加 pointer attention。"""
 
-    def __init__(self, input_dim=1, hidden_dim=128):
+    def __init__(self, input_dim=1, hidden_dim=128, glimpses=1):
         super().__init__()
+        if glimpses not in (0, 1):
+            raise ValueError("glimpses must be 0 or 1")
+
         self.hidden_dim = hidden_dim
+        self.glimpses = glimpses
 
         self.encoder = nn.LSTM(
             input_size=input_dim,
@@ -18,6 +22,7 @@ class PointerNetwork(nn.Module):
             input_size=hidden_dim,
             hidden_size=hidden_dim
         )
+        self.glimpse_refine = nn.Linear(hidden_dim * 2, hidden_dim)
         self.start_token = nn.Parameter(torch.randn(hidden_dim))
 
     def forward(self, x, target=None, mask_selected=True):
@@ -42,8 +47,29 @@ class PointerNetwork(nn.Module):
         for t in range(set_size):
             h, c = self.decoder_cell(decoder_input, (h, c))
 
-            # Pointer attention：用 decoder hidden state 直接给每个输入位置打分。
-            pointer_scores = torch.bmm(memory, h.unsqueeze(-1)).squeeze(-1)
+            pointer_query = h
+            if self.glimpses == 1:
+                # Glimpse attention：Ptr-Net baseline 也可先读取一次 encoder memory。
+                glimpse_scores = torch.bmm(memory, h.unsqueeze(-1)).squeeze(-1)
+                if mask_selected:
+                    glimpse_scores = glimpse_scores.masked_fill(
+                        selected_mask,
+                        float("-inf")
+                    )
+                glimpse_weights = torch.softmax(glimpse_scores, dim=-1)
+                glimpse = torch.bmm(
+                    glimpse_weights.unsqueeze(1),
+                    memory
+                ).squeeze(1)
+                pointer_query = torch.tanh(self.glimpse_refine(
+                    torch.cat([h, glimpse], dim=-1)
+                ))
+
+            # Pointer attention：用当前 query 给每个输入位置打分。
+            pointer_scores = torch.bmm(
+                memory,
+                pointer_query.unsqueeze(-1)
+            ).squeeze(-1)
             if mask_selected:
                 pointer_scores = pointer_scores.masked_fill(
                     selected_mask,
