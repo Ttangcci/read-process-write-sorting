@@ -46,16 +46,19 @@ class ProcessModule(nn.Module):
             attn_weights = F.softmax(scores, dim=-1)
 
             r = torch.bmm(attn_weights.unsqueeze(1), memory).squeeze(1)
-
             q_star = torch.cat([h, r], dim=-1)
 
         return q_star
 
 
 class WriteModule(nn.Module):
-    def __init__(self, hidden_dim=128):
+    def __init__(self, hidden_dim=128, glimpses=1):
         super().__init__()
+        if glimpses not in (0, 1):
+            raise ValueError("glimpses must be 0 or 1")
+
         self.hidden_dim = hidden_dim
+        self.glimpses = glimpses
 
         self.decoder_cell = nn.LSTMCell(
             input_size=hidden_dim,
@@ -90,21 +93,23 @@ class WriteModule(nn.Module):
         for t in range(set_size):
             h, c = self.decoder_cell(decoder_input, (h, c))
 
-            # Glimpse attention：在每个解码步先读取一次 memory，细化当前 decoder query。
-            glimpse_scores = torch.bmm(memory, h.unsqueeze(-1)).squeeze(-1)
-            if mask_selected:
-                glimpse_scores = glimpse_scores.masked_fill(
-                    selected_mask,
-                    float("-inf")
-                )
-            glimpse_weights = F.softmax(glimpse_scores, dim=-1)
-            glimpse = torch.bmm(
-                glimpse_weights.unsqueeze(1),
-                memory
-            ).squeeze(1)
-            pointer_query = torch.tanh(self.glimpse_refine(
-                torch.cat([h, glimpse], dim=-1)
-            ))
+            pointer_query = h
+            if self.glimpses == 1:
+                # Glimpse attention：先读一次 memory，细化当前 decoder query。
+                glimpse_scores = torch.bmm(memory, h.unsqueeze(-1)).squeeze(-1)
+                if mask_selected:
+                    glimpse_scores = glimpse_scores.masked_fill(
+                        selected_mask,
+                        float("-inf")
+                    )
+                glimpse_weights = F.softmax(glimpse_scores, dim=-1)
+                glimpse = torch.bmm(
+                    glimpse_weights.unsqueeze(1),
+                    memory
+                ).squeeze(1)
+                pointer_query = torch.tanh(self.glimpse_refine(
+                    torch.cat([h, glimpse], dim=-1)
+                ))
 
             # Pointer attention：最终输出每个输入位置的 logit，用交叉熵监督目标下标。
             pointer_scores = torch.bmm(
@@ -131,5 +136,4 @@ class WriteModule(nn.Module):
             decoder_input = memory[batch_indices, next_index]
 
         logits = torch.stack(logits_list, dim=1)
-
         return logits

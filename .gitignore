@@ -13,6 +13,7 @@ env/
 *.pth
 *.ckpt
 experiment_results.csv
+figures/
 
 .DS_Store
 .vscode/

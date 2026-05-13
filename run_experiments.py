@@ -22,30 +22,23 @@ def make_loader(num_samples, set_size, batch_size, shuffle):
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 
-def train_one_epoch(model, dataloader, optimizer, device):
+def train_one_batch(model, x, target, optimizer, device):
     model.train()
-    total_loss = 0.0
-    total_samples = 0
+    x = x.to(device)
+    target = target.to(device)
 
-    for x, target in dataloader:
-        x = x.to(device)
-        target = target.to(device)
+    # 两类模型都实现了相同接口，因此训练逻辑可以复用。
+    logits = model(x, target=target)
+    loss = F.cross_entropy(
+        logits.reshape(-1, logits.size(-1)),
+        target.reshape(-1)
+    )
 
-        # 两类模型都实现了相同接口，因此训练逻辑可以复用。
-        logits = model(x, target=target)
-        loss = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)),
-            target.reshape(-1)
-        )
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        total_loss += loss.item() * x.size(0)
-        total_samples += x.size(0)
-
-    return total_loss / total_samples
+    return loss.item()
 
 
 def evaluate_model(model, dataloader, device, set_size):
@@ -79,43 +72,21 @@ def evaluate_model(model, dataloader, device, set_size):
     }
 
 
-def run_single_experiment(
-    model_name,
-    model,
-    set_size,
-    process_steps,
-    args,
-    device
-):
-    train_loader = make_loader(
-        args.train_samples,
-        set_size,
-        args.batch_size,
-        shuffle=True
-    )
-    test_loader = make_loader(
-        args.test_samples,
-        set_size,
-        args.batch_size,
-        shuffle=False
-    )
-
+def train_model(model, train_loader, args, device):
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    start_time = time.time()
-    train_loss = 0.0
+    iterator = iter(train_loader)
+    total_loss = 0.0
 
-    for _ in range(args.epochs):
-        train_loss = train_one_epoch(model, train_loader, optimizer, device)
+    for _ in range(args.train_steps):
+        try:
+            x, target = next(iterator)
+        except StopIteration:
+            iterator = iter(train_loader)
+            x, target = next(iterator)
 
-    metrics = evaluate_model(model, test_loader, device, set_size)
-    metrics.update({
-        "model": model_name,
-        "set_size": set_size,
-        "process_steps": process_steps,
-        "train_loss": train_loss,
-        "seconds": time.time() - start_time,
-    })
-    return metrics
+        total_loss += train_one_batch(model, x, target, optimizer, device)
+
+    return total_loss / args.train_steps
 
 
 def write_result(path, fieldnames, row, write_header):
@@ -126,88 +97,156 @@ def write_result(path, fieldnames, row, write_header):
         writer.writerow(row)
 
 
+def make_result_row(
+    model_name,
+    train_set_size,
+    test_set_size,
+    process_steps,
+    glimpses,
+    train_loss,
+    train_seconds,
+    metrics,
+    args
+):
+    row = {
+        "model": model_name,
+        "train_set_size": train_set_size,
+        "test_set_size": test_set_size,
+        "process_steps": process_steps,
+        "glimpses": glimpses,
+        "train_steps": args.train_steps,
+        "train_samples": args.train_samples,
+        "test_samples": args.test_samples,
+        "hidden_dim": args.hidden_dim,
+        "train_loss": train_loss,
+        "train_seconds": train_seconds,
+    }
+    row.update(metrics)
+    return row
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Compare RPW and Pointer Network on sorting."
+        description="Compare RPW and Pointer Network on out-of-sample sorting."
     )
-    parser.add_argument("--set-sizes", default="5,10,15")
+    parser.add_argument("--train-set-size", type=int, default=config.SET_SIZE)
+    parser.add_argument("--test-set-sizes", default="5,10,15")
     parser.add_argument("--process-steps", default="0,1,5,10")
+    parser.add_argument("--glimpses", default="0,1")
+    parser.add_argument("--train-steps", type=int, default=10000)
     parser.add_argument("--train-samples", type=int, default=config.TRAIN_SAMPLES)
     parser.add_argument("--test-samples", type=int, default=config.TEST_SAMPLES)
     parser.add_argument("--batch-size", type=int, default=config.BATCH_SIZE)
     parser.add_argument("--hidden-dim", type=int, default=config.HIDDEN_DIM)
-    parser.add_argument("--epochs", type=int, default=config.NUM_EPOCHS)
     parser.add_argument("--lr", type=float, default=config.LEARNING_RATE)
     parser.add_argument("--output", default="experiment_results.csv")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    set_sizes = parse_int_list(args.set_sizes)
+    test_set_sizes = parse_int_list(args.test_set_sizes)
     process_steps_list = parse_int_list(args.process_steps)
+    glimpses_list = parse_int_list(args.glimpses)
 
     fieldnames = [
         "model",
-        "set_size",
+        "train_set_size",
+        "test_set_size",
         "process_steps",
-        "epochs",
+        "glimpses",
+        "train_steps",
         "train_samples",
         "test_samples",
         "hidden_dim",
         "train_loss",
         "exact_match",
         "valid_permutation",
-        "seconds",
+        "train_seconds",
     ]
+
     with open(args.output, "w", newline="") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
 
-    for set_size in set_sizes:
-        # Ptr-Net 不包含 process step，因此每个 N 只训练一次 baseline。
+    train_loader = make_loader(
+        args.train_samples,
+        args.train_set_size,
+        args.batch_size,
+        shuffle=True
+    )
+    test_loaders = {
+        test_set_size: make_loader(
+            args.test_samples,
+            test_set_size,
+            args.batch_size,
+            shuffle=False
+        )
+        for test_set_size in test_set_sizes
+    }
+
+    for glimpses in glimpses_list:
+        # Ptr-Net 不包含 process step，但也可以比较 glimpse=0/1。
         baseline = PointerNetwork(
             input_dim=1,
-            hidden_dim=args.hidden_dim
+            hidden_dim=args.hidden_dim,
+            glimpses=glimpses
         ).to(device)
-        result = run_single_experiment(
-            "PointerNetwork",
-            baseline,
-            set_size,
-            "NA",
-            args,
-            device
-        )
-        result.update({
-            "epochs": args.epochs,
-            "train_samples": args.train_samples,
-            "test_samples": args.test_samples,
-            "hidden_dim": args.hidden_dim,
-        })
-        write_result(args.output, fieldnames, result, write_header=False)
-        print(result)
+        start_time = time.time()
+        train_loss = train_model(baseline, train_loader, args, device)
+        train_seconds = time.time() - start_time
+
+        for test_set_size, test_loader in test_loaders.items():
+            metrics = evaluate_model(
+                baseline,
+                test_loader,
+                device,
+                test_set_size
+            )
+            row = make_result_row(
+                "PointerNetwork",
+                args.train_set_size,
+                test_set_size,
+                "NA",
+                glimpses,
+                train_loss,
+                train_seconds,
+                metrics,
+                args
+            )
+            write_result(args.output, fieldnames, row, write_header=False)
+            print(row)
 
         for process_steps in process_steps_list:
-            # RPW 对同一个 N 测试不同 process step，观察 process attention 的影响。
+            # RPW 对同一个训练长度测试不同 process step 和不同测试长度。
             rpw = ReadProcessWriteModel(
                 input_dim=1,
                 hidden_dim=args.hidden_dim,
-                process_steps=process_steps
+                process_steps=process_steps,
+                glimpses=glimpses
             ).to(device)
-            result = run_single_experiment(
-                "ReadProcessWrite",
-                rpw,
-                set_size,
-                process_steps,
-                args,
-                device
-            )
-            result.update({
-                "epochs": args.epochs,
-                "train_samples": args.train_samples,
-                "test_samples": args.test_samples,
-                "hidden_dim": args.hidden_dim,
-            })
-            write_result(args.output, fieldnames, result, write_header=False)
-            print(result)
+            start_time = time.time()
+            train_loss = train_model(rpw, train_loader, args, device)
+            train_seconds = time.time() - start_time
+
+            for test_set_size, test_loader in test_loaders.items():
+                metrics = evaluate_model(
+                    rpw,
+                    test_loader,
+                    device,
+                    test_set_size
+                )
+                row = make_result_row(
+                    "ReadProcessWrite",
+                    args.train_set_size,
+                    test_set_size,
+                    process_steps,
+                    glimpses,
+                    train_loss,
+                    train_seconds,
+                    metrics,
+                    args
+                )
+                write_result(args.output, fieldnames, row, write_header=False)
+                print(row)
 
 
 if __name__ == "__main__":
